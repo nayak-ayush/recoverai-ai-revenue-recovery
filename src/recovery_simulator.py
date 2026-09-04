@@ -12,8 +12,7 @@ Strictly enforces Recovery Agent safety rules without executing real payment tra
 
 import sys
 import uuid
-import joblib
-import pandas as pd
+import onnxruntime as ort
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -26,9 +25,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.ranking_engine import calculate_opportunity_score, classify_priority_level
 from src.recovery_agent import recovery_agent
 
-MODEL_FILE = PROJECT_ROOT / "models" / "recovery_model.pkl"
+MODEL_FILE = PROJECT_ROOT / "models" / "recovery_model.onnx"
 try:
-    model = joblib.load(MODEL_FILE)
+    model = ort.InferenceSession(str(MODEL_FILE), providers=["CPUExecutionProvider"])
 except Exception:
     model = None
 
@@ -91,8 +90,20 @@ def predict_raw_probability(payment_data: Dict[str, Any]) -> float:
         "hour": int(payment_data.get("hour", 12)),
         "is_weekend": int(payment_data.get("is_weekend", 0))
     }
-    df = pd.DataFrame([features_dict])
-    prob = float(model.predict_proba(df)[0][1])
+    inputs = {
+        "amount": [[float(payment_data.get("amount", 0.0))]],
+        "payment_method": [[payment_data.get("payment_method", "card")]],
+        "failure_reason": [[payment_data.get("failure_reason", "network_timeout")]],
+        "previous_payments": [[float(payment_data.get("previous_payments", 0))]],
+        "previous_failures": [[float(payment_data.get("previous_failures", 0))]],
+        "days_since_last_payment": [[float(payment_data.get("days_since_last_payment", 0))]],
+        "subscription": [[float(payment_data.get("subscription", 0))]],
+        "hour": [[float(payment_data.get("hour", 12))]],
+        "is_weekend": [[float(payment_data.get("is_weekend", 0))]],
+    }
+    outputs = model.run(None, inputs)
+    probability_map = outputs[1][0]
+    prob = float(probability_map[1])
     return max(0.0, min(1.0, prob))
 
 
@@ -472,6 +483,7 @@ def generate_sensitivity_analysis(
         modified_payment = dict(payment_data)
         modified_payment["amount"] = float(amt)
         prob = predict_raw_probability(modified_payment)
+        prob = round(prob, 4)
         exp_rev = round(amt * prob, 2)
         results.append({
             "amount": float(amt),

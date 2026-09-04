@@ -1,8 +1,8 @@
 import sys
-import pandas as pd
-import joblib
 from pathlib import Path
 from typing import Dict, Any
+
+import onnxruntime as ort
 
 # ==========================================
 # Paths configuration
@@ -12,11 +12,46 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-MODEL_FILE = PROJECT_ROOT / "models" / "recovery_model.pkl"
+MODEL_FILE = PROJECT_ROOT / "models" / "recovery_model.onnx"
 
 from src.ranking_engine import calculate_opportunity_score
 
-model = joblib.load(MODEL_FILE)
+# Load ONNX model once when the application starts
+session = ort.InferenceSession(
+    str(MODEL_FILE),
+    providers=["CPUExecutionProvider"]
+)
+
+
+# ==========================================
+# ML Prediction
+# ==========================================
+
+def predict_recovery_probability(payment: Dict[str, Any]) -> float:
+    """
+    Run RecoverAI's ONNX model and return the probability
+    that the failed payment can be recovered.
+    """
+
+    inputs = {
+        "amount": [[float(payment.get("amount", 0.0))]],
+        "payment_method": [[payment.get("payment_method", "card")]],
+        "failure_reason": [[payment.get("failure_reason", "network_timeout")]],
+        "previous_payments": [[float(payment.get("previous_payments", 0))]],
+        "previous_failures": [[float(payment.get("previous_failures", 0))]],
+        "days_since_last_payment": [[float(payment.get("days_since_last_payment", 0))]],
+        "subscription": [[float(payment.get("subscription", 0))]],
+        "hour": [[float(payment.get("hour", 12))]],
+        "is_weekend": [[float(payment.get("is_weekend", 0))]],
+    }
+
+    outputs = session.run(None, inputs)
+
+    # ONNX output_probability is a sequence containing
+    # a probability map: {0: probability_class_0, 1: probability_class_1}
+    probability_map = outputs[1][0]
+
+    return float(probability_map[1])
 
 
 # ==========================================
@@ -26,35 +61,20 @@ model = joblib.load(MODEL_FILE)
 def recovery_agent(payment: Dict[str, Any]) -> Dict[str, Any]:
     """
     AI-Powered Recovery Agent with Intelligent Opportunity Ranking.
+
     1. Runs ML model to predict recovery probability.
     2. Enforces safety rules to prevent risky automatic retries.
     3. Calculates intelligent Revenue Opportunity Score & priority level.
     """
+
     # Extract identifiers or generate fallbacks
     payment_id = payment.get("payment_id")
     customer_id = payment.get("customer_id")
     payment_method = payment.get("payment_method", "card")
     retry_count = int(payment.get("retry_count", 0))
 
-    # Convert payment into DataFrame for ML model prediction
-    # Features required by model:
-    # amount, payment_method, failure_reason, previous_payments, previous_failures,
-    # days_since_last_payment, subscription, hour, is_weekend
-    features_dict = {
-        "amount": payment.get("amount", 0.0),
-        "payment_method": payment_method,
-        "failure_reason": payment.get("failure_reason", "network_timeout"),
-        "previous_payments": payment.get("previous_payments", 0),
-        "previous_failures": payment.get("previous_failures", 0),
-        "days_since_last_payment": payment.get("days_since_last_payment", 0),
-        "subscription": payment.get("subscription", 0),
-        "hour": payment.get("hour", 12),
-        "is_weekend": payment.get("is_weekend", 0)
-    }
-    data = pd.DataFrame([features_dict])
-
-    # Get probability from ML model
-    probability = float(model.predict_proba(data)[0][1])
+    # Get probability from ONNX ML model
+    probability = predict_recovery_probability(payment)
 
     # Expected recoverable revenue
     amount = float(payment.get("amount", 0.0))
@@ -63,6 +83,7 @@ def recovery_agent(payment: Dict[str, Any]) -> Dict[str, Any]:
     # ======================================
     # Safety rules
     # ======================================
+
     failure_reason = payment.get("failure_reason", "network_timeout")
 
     # Permanent / risky failures
@@ -111,6 +132,7 @@ def recovery_agent(payment: Dict[str, Any]) -> Dict[str, Any]:
     # ======================================
     # Calculate Intelligent Revenue Opportunity Score
     # ======================================
+
     opportunity_result = calculate_opportunity_score(
         payment_amount=amount,
         recovery_probability=probability,
@@ -128,6 +150,7 @@ def recovery_agent(payment: Dict[str, Any]) -> Dict[str, Any]:
     # ======================================
     # Agent decision
     # ======================================
+
     decision = {
         "payment_id": payment_id,
         "customer_id": customer_id,
